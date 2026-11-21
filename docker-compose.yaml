@@ -1,0 +1,152 @@
+# docker-compose.yml
+# All data lives in ./data on your machine (bind mounts), so `docker compose down` never deletes it.
+x-airflow: &airflow
+  build: ./airflow
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
+    SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+    SQLALCHEMY_DB_URL: postgresql+psycopg2://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./ingestion:/opt/airflow/ingestion
+    - ./sql:/opt/airflow/sql
+    - ./data/airflow/logs:/opt/airflow/logs
+    - ./data/raw_files:/data/raw_files
+  depends_on:
+    airflow-db:
+      condition: service_healthy
+    db:
+      condition: service_healthy
+
+services:
+  # ---------- Warehouse: Supabase Postgres (bronze / silver / gold / ops) ----------
+  db:
+    image: supabase/postgres:15.8.1.060
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      JWT_SECRET: ${JWT_SECRET}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/supabase/db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  meta:
+    image: supabase/postgres-meta:v0.89.3
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: supabase_admin
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  studio:                                            # http://localhost:3000
+    image: supabase/studio:2025.06.30-sha-6f5982d
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DEFAULT_ORGANIZATION_NAME: Local
+      DEFAULT_PROJECT_NAME: Warehouse
+      SUPABASE_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - meta
+
+  sql-init:                                          # applies ./sql/*.sql (idempotent)
+    image: postgres:15-alpine
+    environment:
+      DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+    volumes:
+      - ./sql:/sql:ro
+    command: >
+      sh -c 'for f in /sql/*.sql; do echo "Running $$f"; psql "$$DB_URL" -v ON_ERROR_STOP=1 -f "$$f" || exit 1; done'
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  # ---------- Ingestion: requests, selenium, pandas, sqlalchemy ----------
+  ingestion:                                         # docker compose exec ingestion python main.py
+    build: ./ingestion
+    environment:
+      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      SQLALCHEMY_DB_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+    volumes:
+      - ./ingestion:/app
+      - ./data/raw_files:/data/raw_files
+    shm_size: "2gb"                                  # prevents Chromium crashes
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------- Testing: Jupyter ----------
+  jupyter:                                           # http://localhost:8888
+    build: ./jupyter
+    environment:
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN}
+      SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      SQLALCHEMY_DB_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./ingestion:/home/jovyan/ingestion
+      - ./data/raw_files:/home/jovyan/raw_files
+    shm_size: "2gb"                                  # prevents Chromium crashes
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # ---------- Orchestration ----------
+  airflow-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - ./data/airflow/db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 10
+
+  airflow-init:
+    <<: *airflow
+    command: >
+      bash -c "airflow db migrate &&
+      airflow users create --username admin --password admin
+      --firstname Admin --lastname User --role Admin --email admin@example.com || true"
+    restart: "no"
+
+  airflow-webserver:                                 # http://localhost:8080
+    <<: *airflow
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped

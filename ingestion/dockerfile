@@ -1,0 +1,22 @@
+# ingestion/Dockerfile
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Chromium + matching driver for Selenium
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends chromium chromium-driver fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install dependencies first so Docker caches this layer
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY . .
+
+# Keep the container alive: docker compose exec ingestion python main.py
+CMD ["sleep", "infinity"]

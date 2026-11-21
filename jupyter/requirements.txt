@@ -1,0 +1,6 @@
+# jupyter/requirements.txt
+requests
+selenium
+pandas
+sqlalchemy
+psycopg[binary]

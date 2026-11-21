@@ -1,0 +1,5 @@
+# airflow/requirements.txt
+apache-airflow-providers-postgres
+psycopg[binary]
+requests
+pandas
