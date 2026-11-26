@@ -81,6 +81,8 @@ services:
   # ---------- Ingestion: requests, selenium, pandas, sqlalchemy ----------
   ingestion:                                         # docker compose exec ingestion python main.py
     build: ./ingestion
+    env_file:
+      - ./ingestion/.env                             # API_KEY lives here
     environment:
       SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
       SQLALCHEMY_DB_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
@@ -96,8 +98,11 @@ services:
   # ---------- Testing: Jupyter ----------
   jupyter:                                           # http://localhost:8888
     build: ./jupyter
+    env_file:
+      - ./jupyter/.env                               # API_KEY lives here
     environment:
       JUPYTER_TOKEN: ${JUPYTER_TOKEN}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}        # <-- added: fixes KeyError in notebooks
       SUPABASE_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
       SQLALCHEMY_DB_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
     ports:
